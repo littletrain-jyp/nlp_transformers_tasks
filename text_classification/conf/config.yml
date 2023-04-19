@@ -1,0 +1,9 @@
+task:
+  name: text_classification
+  desc: code_test  # 任务描述信息
+
+dataset:
+  data_dir:
+
+model:
+  pretrained_dirfile:
