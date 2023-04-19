@@ -6,4 +6,7 @@ dataset:
   data_dir:
 
 model:
-  pretrained_dirfile:
+  pretrained_name_or_path: bert-base-cased
+
+train:
+
