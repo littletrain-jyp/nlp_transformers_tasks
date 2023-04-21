@@ -9,13 +9,15 @@ import torch.nn as nn
 
 # 序列分类
 class SequenceClassificationModel(nn.Module):
-    def __int__(self, args):
-        super(SequenceClassificationModel, self).__int__()
+    def __init__(self, pretrained_name_or_path, num_labels):
+        super().__init__()
         try:
-            self.config = AutoConfig.from_pretrained(args.model.pretrained_name_or_path)
-            self.model = AutoModelForSequenceClassification.from_pretrained(self.config)
+            self.config = AutoConfig.from_pretrained(pretrained_name_or_path)
+            self.config.num_labels = num_labels
+            self.model = AutoModelForSequenceClassification.from_config(self.config)
         except:
-            assert NotImplementedError (f"model:{args.model.pretrained_name_or_path} not support!")
+            assert NotImplementedError (f"model:{pretrained_name_or_path} not support!")
+
 
 
 

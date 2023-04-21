@@ -1,12 +1,25 @@
-task:
-  name: text_classification
-  desc: code_test  # 任务描述信息
-
 dataset:
-  data_dir:
+  train_dataset: ./data/aiwin/splited_train_data.txt
+  eval_dataset: ./data/aiwin/splited_eval_data.txt
+  predict_dataset: ./data/aiwin/eval_dataset.txt
+  label_dir: ./data/aiwin/label.txt
 
 model:
-  pretrained_name_or_path: bert-base-cased
+  pretrained_name_or_path: voidful/albert_chinese_small
+
+run:
+  device_id: '-1' # 使用cpu则置为-1
 
 train:
+  num_epoch: 1
+  per_device_batch_size: 1
+  steps_per_epoch: 4
+
+  max_length: 16
+
+  learning_rate: 3.0e-5
+  gradient_accumulation_steps: 4
+
+
+
 
