@@ -4,21 +4,20 @@
 # @File         : pretrained4classification.py
 # @Description  :
 
+
+import logging
 from transformers import AutoModelForSequenceClassification, AutoConfig
-import torch.nn as nn
+
+logger = logging.getLogger(__name__)
 
 # 序列分类
-class SequenceClassificationModel(nn.Module):
-    def __init__(self, pretrained_name_or_path, num_labels):
-        super().__init__()
+class SequenceClassificationModel:
+    def __init__(self, pretrained_name_or_path, **kwargs):
         try:
-            self.config = AutoConfig.from_pretrained(pretrained_name_or_path)
-            self.config.num_labels = num_labels
+            self.config = AutoConfig.from_pretrained(pretrained_name_or_path, **kwargs)
             self.model = AutoModelForSequenceClassification.from_config(self.config)
         except:
             assert NotImplementedError (f"model:{pretrained_name_or_path} not support!")
-
-
 
 
 

@@ -41,6 +41,12 @@ class ClassificationDataset(Dataset):
         return self.data[item]
 
     def _process_sample(self, sample_dt, has_label=True):
+        """
+        自定义处理数据
+        :param sample_dt:
+        :param has_label:
+        :return:
+        """
         raise ImportError ("basecalss not support yet! You should overwrite it!")
 
     def load_data(self, file_path, has_label=True):
@@ -68,7 +74,7 @@ class CnewsDataset(ClassificationDataset):
 class AiwinDataset(ClassificationDataset):
     def _process_sample(self, sample_dt, has_label=True):
         label = sample_dt['label']
-        text = f"header:{sample_dt['header']}\ntitle:{sample_dt['title']}\nparagraph:{sample_dt['paragraph']}\nfooter:{sample_dt['footer']}"
+        text = f"header:{sample_dt['header']} [SEP] {sample_dt['title']} [SEP] {sample_dt['paragraph']} [SEP] {sample_dt['footer']}"
         if has_label:
             return InputExample(text=text, label=label)
         else:
@@ -114,7 +120,7 @@ class Collate:
             batch_input_ids.append(output['input_ids'])
             batch_attention_mask.append(output['attention_mask'])
             batch_token_type_ids.append(output['token_type_ids'])
-            if label:
+            if label is not None:
                 batch_labels.append(label)
 
         batch_input_ids = torch.tensor(batch_input_ids, dtype=torch.long)
@@ -129,6 +135,10 @@ class Collate:
         if len(batch_labels) != 0:
             batch_labels = torch.tensor(batch_labels, dtype=torch.long)
             input_features.update({'labels': batch_labels})
+            assert len(batch_labels) == len(batch_input_ids)
+        else:
+            print(batch)
+
 
         return input_features
 

@@ -5,20 +5,35 @@ dataset:
   label_dir: ./data/aiwin/label.txt
 
 model:
-  pretrained_name_or_path: voidful/albert_chinese_small
+  pretrained_name_or_path: hfl/chinese-electra-180g-small-discriminator # uer/albert-base-chinese-cluecorpussmall
 
 run:
   device_id: '-1' # 使用cpu则置为-1
 
 train:
-  num_epoch: 1
+  train_epochs: 1
   per_device_batch_size: 1
-  steps_per_epoch: 4
+  logging_steps: 20
+  eval_steps: 32
 
-  max_length: 16
+  select_model_metric: 'macro_f1'
+
+  use_class_weight: True # 是否按类别数量权重更新loss
+  class_weight_max_scale_ratio: 10.0 # 最大扩充比例
+
+  use_adversarial: True # 默认FGM
+
+  max_length: 32
 
   learning_rate: 3.0e-5
-  gradient_accumulation_steps: 4
+  gradient_accumulation_steps: 2
+  warmup_ratio: 0.01
+  max_grad_norm: 1.0
+  weight_decay: 0.01
+
+  adam_epsilon: 1e-8
+
+
 
 
 

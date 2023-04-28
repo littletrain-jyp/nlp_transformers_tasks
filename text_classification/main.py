@@ -6,14 +6,17 @@
 
 import os
 import logging
-
 import torch
 import yaml
 import argparse
-from transformers import TrainingArguments, Trainer, AutoTokenizer
+import numpy as np
 from torch.utils.data import DataLoader
+from sklearn.metrics import classification_report
+from transformers import TrainingArguments, Trainer, AutoTokenizer, \
+    get_scheduler, BertForSequenceClassification
 
 from dataset.dataset import AiwinDataset, Collate
+from classification_trainer import ClassificationTrainer, classification_predict
 from models.pretrained4classification import SequenceClassificationModel
 
 logger = logging.getLogger(__name__)
@@ -59,44 +62,75 @@ if __name__ == "__main__":
     with open(args.dataset.label_dir, 'r') as f:
         labels = f.readlines()
     labels = [label.strip() for label in labels]
-    labels2id = [{}.update({v: k}) for k, v in enumerate(labels)]
-    id2labels = [{}.update({k: v}) for k, v in enumerate(labels)]
+    label2id = dict(zip(labels, list(range(len(labels)))))
+    id2label = dict(zip(list(range(len(labels))), labels))
 
-    train_dataset = AiwinDataset(file_path=args.dataset.eval_dataset, has_label=True)
-    train_loader = DataLoader(dataset=train_dataset, shuffle=True)
+    train_dataset = AiwinDataset(file_path=args.dataset.train_dataset, has_label=True)
+    train_loader = DataLoader(dataset=train_dataset,
+                              batch_size= args.train.per_device_batch_size,
+                              shuffle=True)
+
+    eval_dataset = AiwinDataset(file_path=args.dataset.eval_dataset, has_label=True)
+    eval_loader = DataLoader(dataset=eval_dataset,
+                             batch_size=args.train.per_device_batch_size,
+                             shuffle=False)
 
     # --------------load model-------------
     tokenizer = AutoTokenizer.from_pretrained(args.model.pretrained_name_or_path)
-    model = SequenceClassificationModel(args.model.pretrained_name_or_path, 10)
-    Collator = Collate(tokenizer, args.train.max_length, labels2id)
-    # 配置Training TrainingArguments
-    train_args = TrainingArguments(
-        output_dir=args.output_dir,
-        logging_dir=args.output_log_dir,
-        do_train=args.do_train,
-        do_eval=args.do_eval,
-        do_predict=args.do_predict,
-        evaluation_strategy='steps',
-        eval_steps=args.train.steps_per_epoch,
-        prediction_loss_only=True,
-        per_device_train_batch_size=args.train.per_device_batch_size,
-        per_device_eval_batch_size=args.train.per_device_batch_size,
-        gradient_accumulation_steps=args.train.gradient_accumulation_steps,
-        num_train_epochs=args.train.num_epoch,
-        learning_rate= args.train.learning_rate,
-        save_steps=args.train.steps_per_epoch,
-        save_strategy='steps',
-        save_total_limit=3,
-        load_best_model_at_end=True,
-    )
+    model = SequenceClassificationModel(args.model.pretrained_name_or_path,
+                                        num_labels=10,
+                                        label2id=label2id,
+                                        id2label=id2label,
+                                        return_dict=True).model
+    Collator = Collate(tokenizer, args.train.max_length, id2label)
 
-    trainer = Trainer(model=model.model,
-                      args=train_args,
-                      data_collator=Collator.collate_fn,
-                      train_dataset=train_dataset)
+    if args.do_train:
+        # 设置权重衰减参数
+        no_decay = ["bias", "LayerNorm.weight", "LayerNorm.bias"]
+        optimizer_grouped_parameters = [
+            {
+                "params": [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)],
+                "weight_decay": args.train.weight_decay,
+            },
+            {
+                "params": [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)],
+                "weight_decay": 0.0,
+            }]
+        optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=args.train.learning_rate)
+
+        # 设置lr_scheduler
+        num_update_steps_per_epoch = len(train_loader) # 每个epoch 步数
+        max_train_steps = args.train.train_epochs * num_update_steps_per_epoch # 最大训练步数
+        warm_steps = int(args.warmup_ratio * max_train_steps) # 热身步数
+        # 线性
+        lr_scheduler = get_scheduler(
+            name='linear',
+            optimizer=optimizer,
+            num_warmup_steps=warm_steps,
+            num_training_steps=max_train_steps,
+        )
+        # # 余弦退火曲线
+        # lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, max_train_steps)
+
+    trainer = ClassificationTrainer(args=args,
+                                    device=device,
+                                    model=model,
+                                    optimizer=optimizer,
+                                    lr_scheduler=lr_scheduler,
+                                    train_loader=train_loader,
+                                    dev_loader=eval_loader)
 
     if args.do_train:
         trainer.train()
+
+    if args.do_eval:
+        trainer.evaluate()
+        predictions, labels, loss = trainer.predict(eval_dataset)
+        prediction_list = np.argmax(predictions, axis=1).flatten().tolist()
+        labels_list = labels.tolist()
+        print(classification_report(labels_list, prediction_list))
+
+
 
     print('finish')
 
