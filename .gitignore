@@ -1,6 +1,5 @@
-text_classification/data/cnews/cnews.*
-text_classification/data/aiwin/*.npy
-*__pycache__*
-*.txt
+*text_classification/data/cnews/cnews.*
+*text_classification/data/aiwin/*.npy
 *runs*
+*__pycache__*
 

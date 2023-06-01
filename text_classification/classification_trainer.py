@@ -5,6 +5,7 @@
 # @Description  :
 
 import os
+import time
 import torch
 import logging
 import numpy as np
@@ -12,8 +13,12 @@ import torch.nn as nn
 from tqdm import tqdm
 from typing import List
 from torch.utils.data import DataLoader
-from transformers import AutoModelForSequenceClassification, AutoConfig
+from torch.cuda.amp import autocast, GradScaler
+from transformers import AutoModelForSequenceClassification, AutoConfig, BertForSequenceClassification
 from sklearn.metrics import accuracy_score, f1_score, classification_report
+
+from utils.CommonUtils import keep_checkpoints_num, get_time_diff
+from utils.adversarial import FGM
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +36,9 @@ class ClassificationTrainer:
         self.test_loader = test_loader
         self.predict_loader = predict_loader
         self.model.to(self.device)
+        self.train_class_weight = self.get_class_weight(train_loader.dataset)
+        if self.args.train.with_amp:
+            self.scaler = GradScaler()
 
     def load_ckp(self, model, optimizer, checkpoint_path):
         checkpoint = torch.load(checkpoint_path)
@@ -54,40 +62,89 @@ class ClassificationTrainer:
         logger.info("***** Running training *****")
         logger.info(f"  Num examples = {len(self.train_loader.dataset) * self.args.train.train_epochs}")
         logger.info(f"  Num Epochs = {self.args.train.train_epochs}")
-        logger.info(f"  Instantaneous batch size per device = {self.args.train.per_device_train_batch_size}")
+        logger.info(f"  Instantaneous batch size per device = {self.args.train.per_device_batch_size}")
         logger.info(f"  Gradient Accumulation steps = {self.args.train.gradient_accumulation_steps}")
 
+        if self.args.train.use_adversarial:
+            fgm = FGM(self.model, emb_name='word_embedding')
+
         total_step = len(self.train_loader) * self.args.train.train_epochs
-        global_step = 0
+        global_step = 1
         best_select_model_metric = 0.0
+        start_time = time.time()
         for epoch in range(self.args.train.train_epochs):
+            epoch_start_time = time.time()
             for train_step, train_data in enumerate(tqdm(self.train_loader)):
                 self.model.train()
 
                 input_ids = train_data['input_ids'].to(self.device)
-                attention_masks = train_data['attention_masks'].to(self.device)
+                attention_mask = train_data['attention_mask'].to(self.device)
                 token_type_ids = train_data['token_type_ids'].to(self.device)
                 labels = train_data['labels'].to(self.device)
 
-                train_outputs = self.model(input_ids, attention_masks, token_type_ids, labels)
-                loss = train_outputs.loss / self.args.train.gradient_accumulation_steps # 损失标准化
-                loss.backward() # 反向传播，计算梯度
+                if self.args.train.with_amp:
+                    with autocast():
+                        train_outputs = self.model(
+                            input_ids=input_ids,
+                            attention_mask=attention_mask,
+                            token_type_ids=token_type_ids,
+                            labels=labels)
+                        loss = train_outputs.loss
+                else:
+                    train_outputs = self.model(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        token_type_ids=token_type_ids,
+                        labels=labels)
+                    loss = train_outputs.loss
+
+                # 按照权重类别更新loss
+                if self.args.train.use_class_weight:
+                    labels = train_data['labels'].tolist()
+                    weights = [self.train_class_weight[label] for label in labels]
+                    weight = sum(weights) / len(weights)
+                    loss *= weight
+
+                loss = loss / self.args.train.gradient_accumulation_steps # 损失标准化
+
+                if self.args.train.with_amp:
+                    self.scaler.scale(loss).backward() # 半精度的数值范围有限，需要用它放大
+                else:
+                    loss.backward() # 反向传播，计算梯度
+
+                if self.args.train.use_adversarial:
+                    fgm.attack()
+                    loss_adv = self.model(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        token_type_ids=token_type_ids,
+                        labels=labels).loss
+                    loss_adv.backward()
+                    fgm.restore()
 
                 if (train_step + 1) % self.args.train.gradient_accumulation_steps == 0:
-                    torch.nn.utils.clip_grad_norm(self.model.parameters(), self.args.train.max_grad_norm)
-                    self.optimizer.step()  #优化器更新参数
+                    if self.args.train.with_amp:
+                        self.scaler.unscale_(self.optimizer)
+                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.train.max_grad_norm)
+                        self.scaler.step(self.optimizer)
+                        self.scaler.update()
+                    else:
+                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.train.max_grad_norm)
+                        self.optimizer.step()  #优化器更新参数
+
                     self.lr_scheduler.step() # lr_scheduler 更新参数
                     self.optimizer.zero_grad() # 优化器的梯度清零，注意区分model.zero_grad
 
                 if global_step % self.args.train.logging_steps == 0:
                     logger.info(
-                        f"【train】 epoch：{epoch} epoch_step:{train_step}/{len(self.train_loader)}, "
-                        f"global_step:{global_step}/{total_step} loss：{loss.item():.6f}")
-                global_step += 1
+                        f"【train】 epoch：{epoch} epoch_step:{train_step+1}/{len(self.train_loader)}, "
+                        f"global_step:{global_step}/{total_step} loss：{loss.item():.6f} "
+                        f"epoch_cost_time:{get_time_diff(epoch_start_time)} total_epoch_time:{(get_time_diff(epoch_start_time) / train_step * len(self.train_loader))} "
+                        f"total_cost_time:{get_time_diff(start_time)} total_remaining_time:{(get_time_diff(start_time) / global_step * total_step)} ")
+
                 # 评估并保存checkpoint
                 if global_step % self.args.train.eval_steps == 0:
-                    dev_loss, dev_outputs, dev_targets = self.dev()
-                    metrics = self.get_metrics(dev_outputs, dev_targets)
+                    dev_loss, dev_outputs, dev_targets, metrics = self.dev(self.dev_loader)
                     try:
                         select_model_metric = metrics[self.args.train.select_model_metric]
                     except:
@@ -100,10 +157,13 @@ class ClassificationTrainer:
                         checkpoint = {
                             'epoch': epoch,
                             'loss': dev_loss,
+                            'global_step': global_step,
                             'state_dict': self.model.state_dict(),
-                            'opt·imizer': self.optimizer.state_dict(),
+                            'optimizer': self.optimizer.state_dict(),
                         }
                         best_select_model_metric = select_model_metric
+
+                        keep_checkpoints_num(self.args.output_ckpt_dir) # 删掉多余的ckpt
                         checkpoint_dir_name = f"checkpoint_epoch{epoch}_step{global_step}"
                         save_path = os.path.join(self.args.output_ckpt_dir, checkpoint_dir_name)
                         if not os.path.exists(save_path):
@@ -112,15 +172,19 @@ class ClassificationTrainer:
                         logger.info(f"------------>保存当前最好的模型到: {checkpoint_path}")
                         self.save_ckp(checkpoint, checkpoint_path)
 
-    def dev(self):
-        total_loss, dev_outputs, dev_targets = self._eval_loop(self.dev_loader, "eval")
+                global_step += 1
+
+    def dev(self, dev_loader=None, desc="eval"):
+        if not dev_loader:
+            dev_loader = self.dev_loader
+        total_loss, dev_outputs, dev_targets = self._eval_loop(dev_loader, desc)
         metrics = self.get_metrics(dev_outputs, dev_targets)
-        logger.info(f"--eval result: {self.print_metrics(metrics)}")
+        logger.info(f"\n{desc} result: {self.print_metrics(metrics)}")
+        logger.info(self.get_classification_report(dev_outputs, dev_targets, self.train_loader.dataset.label2id.keys()))
+        return total_loss, dev_outputs, dev_targets, metrics
 
     def test(self):
-        total_loss, test_outputs, test_targets = self._eval_loop(self.test_loader, "test")
-        metrics = self.get_metrics(test_outputs, test_targets)
-        logger.info(f"--test result: {self.print_metrics(metrics)}")
+        return self.dev(dev_loader=self.test_loader, desc="test")
 
     def predict_dataset(self):
         return self._predict_loop(self.predict_loader, 'predict')
@@ -135,16 +199,21 @@ class ClassificationTrainer:
         dev_outputs = []
         dev_targets = []
         with torch.no_grad():
-            for dev_step, dev_data in enumerate(tqdm(dataloader)):
+            for dev_step, dev_data in enumerate(tqdm(dataloader, leave=False)):
                 input_ids = dev_data['input_ids'].to(self.device)
-                attention_masks = dev_data['attention_masks'].to(self.device)
+                attention_mask = dev_data['attention_mask'].to(self.device)
                 token_type_ids = dev_data['token_type_ids'].to(self.device)
                 labels = dev_data['labels'].to(self.device)
 
-                outputs = self.model(input_ids, attention_masks, token_type_ids, labels)
-                # val_loss = val_loss + ((1 / (dev_step + 1))) * (loss.item() - val_loss)
+                outputs = self.model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    token_type_ids=token_type_ids,
+                    labels=labels
+                )
+
                 total_loss += outputs.loss.item()
-                outputs_res = np.argmax(outputs.logits, axis=1).flatten()
+                outputs_res = np.argmax(outputs.logits.cpu(), axis=1).flatten()
                 dev_outputs.extend(outputs_res.tolist())
                 dev_targets.extend(labels.tolist())
 
@@ -158,13 +227,15 @@ class ClassificationTrainer:
         self.model.eval()
         dev_outputs = []
         with torch.no_grad():
-            for step, batch_data in enumerate(tqdm(dataloader)):
+            for step, batch_data in enumerate(tqdm(dataloader, leave=False)):
                 input_ids = batch_data['input_ids'].to(self.device)
-                attention_masks = batch_data['attention_masks'].to(self.device)
+                attention_mask = batch_data['attention_mask'].to(self.device)
                 token_type_ids = batch_data['token_type_ids'].to(self.device)
 
-                outputs = self.model(input_ids, attention_masks, token_type_ids)
-                outputs_res = np.argmax(outputs.logits, axis=1).flatten()
+                outputs = self.model(input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    token_type_ids=token_type_ids)
+                outputs_res = np.argmax(outputs.logits.cpu(), axis=1).flatten()
                 dev_outputs.extend(outputs_res.tolist())
 
         return dev_outputs
@@ -183,7 +254,7 @@ class ClassificationTrainer:
             else:
                 class_count_dict[label] += 1
         class_count_dict = dict(sorted(class_count_dict.items(), key=lambda x: x[0]))
-        print('[+] sample(s) count of each class: ', class_count_dict)
+        logger.info(f'[+] sample(s) count of each class: {class_count_dict}')
 
         class_weight_dict = {}
         class_count_sorted_tuple = sorted(class_count_dict.items(), key=lambda x: x[1], reverse=True)
@@ -194,7 +265,7 @@ class ClassificationTrainer:
                 scale_ratio = class_count_sorted_tuple[0][1] / class_count_sorted_tuple[i][1]
                 scale_ratio = min(scale_ratio, self.args.train.class_weight_max_scale_ratio)  # 数量少多少倍，loss就scale几倍
                 class_weight_dict[class_count_sorted_tuple[i][0]] = scale_ratio
-        print('[+] weight(s) of each class: ', class_weight_dict)
+        logger.info(f'[+] weight(s) of each class: {class_weight_dict}')
         return class_weight_dict
 
     def get_metrics(self, outputs, targets) -> dict:
@@ -209,14 +280,13 @@ class ClassificationTrainer:
 
     def print_metrics(self, metrics: dict) -> str:
         metrics_str = ''
-        for k,v in metrics:
-            metrics_str += f'{k}:{v:.6f}'
+        for k, v in metrics.items():
+            metrics_str += f' {k}:{v:.6f} '
         return metrics_str
 
     def get_classification_report(self, outputs, targets, labels):
         report = classification_report(targets, outputs, target_names=labels)
         return report
-
 
 def classification_predict(tokenizer, text, device, args, model):
     if isinstance(text, List):
@@ -233,13 +303,20 @@ def classification_predict(tokenizer, text, device, args, model):
                                        return_attention_mask=True,
                                        return_tensors='pt')
         token_ids = inputs['input_ids'].to(device)
-        attention_masks = inputs['attention_mask'].to(device)
+        attention_mask = inputs['attention_mask'].to(device)
         token_type_ids = inputs['token_type_ids'].to(device)
 
-        outputs = model(token_ids, attention_masks, token_type_ids)
-        outputs_res = np.argmax(outputs.logits, axis=1).flatten().tolist()
+        outputs = model(token_ids, attention_mask, token_type_ids)
+        outputs_res = np.argmax(outputs.logits.cpu(), axis=1).flatten().tolist()
         if len(outputs_res) != 0:
             return outputs_res
         else:
             return '不好意思，我没有识别出来'
+
+
+
+
+
+
+
 

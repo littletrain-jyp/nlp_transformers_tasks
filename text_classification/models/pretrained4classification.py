@@ -6,7 +6,8 @@
 
 
 import logging
-from transformers import AutoModelForSequenceClassification, AutoConfig
+import torch.nn as nn
+from transformers import AutoModelForSequenceClassification, AutoConfig,AutoModel, BertModel, BertForSequenceClassification
 
 logger = logging.getLogger(__name__)
 
@@ -15,13 +16,8 @@ class SequenceClassificationModel:
     def __init__(self, pretrained_name_or_path, **kwargs):
         try:
             self.config = AutoConfig.from_pretrained(pretrained_name_or_path, **kwargs)
-            self.model = AutoModelForSequenceClassification.from_config(self.config)
+            # 如果用from_config加载不会加载模型权重，只影响模型配置，所以要用from_pretrained
+            self.model = AutoModelForSequenceClassification.from_pretrained(pretrained_name_or_path,
+                                                                            config=self.config)
         except:
             assert NotImplementedError (f"model:{pretrained_name_or_path} not support!")
-
-
-
-
-
-
-
