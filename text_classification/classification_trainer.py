@@ -17,17 +17,18 @@ from torch.cuda.amp import autocast, GradScaler
 from transformers import AutoModelForSequenceClassification, AutoConfig, BertForSequenceClassification
 from sklearn.metrics import accuracy_score, f1_score, classification_report
 
-from utils.CommonUtils import keep_checkpoints_num, get_time_diff
+from utils.CommonUtils import keep_checkpoints_num, get_time_diff, save_ckp, load_model
 from utils.adversarial import FGM
 
 logger = logging.getLogger(__name__)
 
 # 训练器
 class ClassificationTrainer:
-    def __init__(self, args, device, model, optimizer, lr_scheduler,
+    def __init__(self, args, device, tokenizer, model, optimizer, lr_scheduler,
                  train_loader, dev_loader, test_loader=None, predict_loader=None,):
         self.args = args
         self.device = device
+        self.tokenizer = tokenizer
         self.model = model
         self.optimizer = optimizer
         self.lr_scheduler = lr_scheduler
@@ -36,27 +37,13 @@ class ClassificationTrainer:
         self.test_loader = test_loader
         self.predict_loader = predict_loader
         self.model.to(self.device)
-        self.train_class_weight = self.get_class_weight(train_loader.dataset)
+
+        if self.args.dataset.problem_type == 'single_label_classification':
+            self.train_class_weight = self.get_class_weight(train_loader.dataset)
         if self.args.train.with_amp:
             self.scaler = GradScaler()
 
-    def load_ckp(self, model, optimizer, checkpoint_path):
-        checkpoint = torch.load(checkpoint_path)
-        model.load_state_dict(checkpoint['state_dict'])
-        optimizer.load_state_dict(checkpoint['optimizer'])
-        epoch = checkpoint['epoch']
-        loss = checkpoint['loss']
-        return model, optimizer, epoch, loss
-
-    def load_model(self, model, checkpoint_path):
-        checkpoint = torch.load(checkpoint_path)
-        model.load_state_dict(checkpoint['state_dict'])
-        logger.info(f"---{checkpoint_path} read successfully! ")
-        return model
-
-    def save_ckp(self, state, checkpoint_path):
-        torch.save(state, checkpoint_path)
-        logger.info(f"---{checkpoint_path} saved successfully! ")
+        self.best_ckpt_dir = None
 
     def train(self):
         logger.info("***** Running training *****")
@@ -99,7 +86,7 @@ class ClassificationTrainer:
                     loss = train_outputs.loss
 
                 # 按照权重类别更新loss
-                if self.args.train.use_class_weight:
+                if self.args.train.use_class_weight and self.args.dataset.problem_type == 'single_label_classification':
                     labels = train_data['labels'].tolist()
                     weights = [self.train_class_weight[label] for label in labels]
                     weight = sum(weights) / len(weights)
@@ -169,14 +156,23 @@ class ClassificationTrainer:
                         if not os.path.exists(save_path):
                             os.makedirs(save_path)
                         checkpoint_path = os.path.join(save_path, 'best.pt')
+                        self.best_ckpt_dir = checkpoint_path
                         logger.info(f"------------>保存当前最好的模型到: {checkpoint_path}")
-                        self.save_ckp(checkpoint, checkpoint_path)
+                        save_ckp(checkpoint, checkpoint_path)
 
                 global_step += 1
 
-    def dev(self, dev_loader=None, desc="eval"):
+        # 所有训练结束后，加载验证集效果最后的模型进行验证
+        logger.info(f"------------>加载当前最好的模型到: {self.best_ckpt_dir}")
+        self.model = load_model(self.model, self.best_ckpt_dir, self.device)
+        self.dev()
+
+    def dev(self, dev_loader=None, desc="eval", ckpt_dir=None):
         if not dev_loader:
             dev_loader = self.dev_loader
+        if ckpt_dir:
+            self.model = load_model(self.model, ckpt_dir, self.device)
+
         total_loss, dev_outputs, dev_targets = self._eval_loop(dev_loader, desc)
         metrics = self.get_metrics(dev_outputs, dev_targets)
         logger.info(f"\n{desc} result: {self.print_metrics(metrics)}")
@@ -186,8 +182,42 @@ class ClassificationTrainer:
     def test(self):
         return self.dev(dev_loader=self.test_loader, desc="test")
 
-    def predict_dataset(self):
+    def predict_dataset(self, ckpt_dir=None):
+        """ 文件类预测 """
+        # 加载模型
+        if ckpt_dir:
+            self.model = load_model(self.model, ckpt_dir, self.device)
         return self._predict_loop(self.predict_loader, 'predict')
+
+    def predict(self, text, ckpt_dir=None):
+        """ 单条文本预测 """
+        # 加载模型
+        if ckpt_dir:
+            self.model = load_model(self.model, ckpt_dir, self.device)
+
+        token_res = self.tokenizer.encode_plus(text=text,
+                                            max_length=self.args.train.max_length,
+                                            padding='max_length',
+                                            truncation='longest_first',
+                                            return_attention_mask=True,
+                                            return_token_type_ids=True)
+        input_ids = torch.tensor([token_res['input_ids']], dtype=torch.long).to(self.device)
+        attention_mask = torch.tensor([token_res['attention_mask']], dtype=torch.long).to(self.device)
+        token_type_ids = torch.tensor([token_res['token_type_ids']], dtype=torch.long).to(self.device)
+
+        outputs = self.model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids)
+
+        if self.args.dataset.problem_type == 'single_label_classification':
+            outputs_res = np.argmax(outputs.logits.cpu().detach().numpy(), axis=1).flatten().tolist()
+        else:
+            outputs_res = torch.sigmoid(outputs.logits).cpu().detach().numpy().tolist()
+            outputs_res = (np.array(outputs_res) > self.args.dataset.multi_label_classification_threshold).astype(int)
+            outputs_res = np.where(outputs_res[0] == 1)[0].tolist()
+        return outputs_res
+
 
     def _eval_loop(self,
                    dataloader: DataLoader,
@@ -213,9 +243,15 @@ class ClassificationTrainer:
                 )
 
                 total_loss += outputs.loss.item()
-                outputs_res = np.argmax(outputs.logits.cpu(), axis=1).flatten()
+
+                if self.args.dataset.problem_type == 'single_label_classification':
+                    outputs_res = np.argmax(outputs.logits.cpu(), axis=1).flatten()
+                else:
+                    outputs_res = torch.sigmoid(outputs.logits).cpu().detach().numpy().tolist()
+                    outputs_res = (np.array(outputs_res) > self.args.dataset.multi_label_classification_threshold).astype(int)
+
                 dev_outputs.extend(outputs_res.tolist())
-                dev_targets.extend(labels.tolist())
+                dev_targets.extend(labels.cpu().detach().numpy().tolist())
 
         return total_loss, dev_outputs, dev_targets
 
@@ -225,7 +261,7 @@ class ClassificationTrainer:
         logger.info(f"***** Running {description} *****")
         logger.info(f"  Num examples = {len(dataloader)}")
         self.model.eval()
-        dev_outputs = []
+        pred_outputs = []
         with torch.no_grad():
             for step, batch_data in enumerate(tqdm(dataloader, leave=False)):
                 input_ids = batch_data['input_ids'].to(self.device)
@@ -235,14 +271,21 @@ class ClassificationTrainer:
                 outputs = self.model(input_ids=input_ids,
                     attention_mask=attention_mask,
                     token_type_ids=token_type_ids)
-                outputs_res = np.argmax(outputs.logits.cpu(), axis=1).flatten()
-                dev_outputs.extend(outputs_res.tolist())
 
-        return dev_outputs
+                if self.args.dataset.problem_type == 'single_label_classification':
+                    outputs_res = np.argmax(outputs.logits.cpu().detach().numpy(), axis=1).flatten()
+                else:
+                    outputs_res = torch.sigmoid(outputs.logits).cpu().detach().numpy().tolist()
+                    outputs_res = (np.array(outputs_res) > self.args.dataset.multi_label_classification_threshold).astype(int)
+                    outputs_res = [np.where(i == 1)[0].tolist() for i in outputs_res]
+
+                pred_outputs.extend(outputs_res)
+
+        return pred_outputs
 
     def get_class_weight(self, dataset):
         """
-        获取每个类的权重，用于出现类别imbalance 情况时进行少样本类别系数补偿
+        获取每个类的权重，用于出现类别imbalance 情况时进行少样本类别系数补偿, 仅支持单标签
         :param dataset:
         :return:
         """

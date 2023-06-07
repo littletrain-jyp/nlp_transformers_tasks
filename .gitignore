@@ -1,5 +1,4 @@
-*text_classification/data/cnews/cnews.*
-*text_classification/data/aiwin/*.npy
 *runs*
 *__pycache__*
-
+*text_classification/data/cnews/cnews.*
+*text_classification/data/baidu_event_extra_2020/raw_data/*.json

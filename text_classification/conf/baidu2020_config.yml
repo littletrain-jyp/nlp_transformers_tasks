@@ -1,0 +1,41 @@
+dataset:
+  problem_type: multi_label_classification # single_label_classification, multi_label_classification 两种任务形式，二选一
+  train_dataset: ./data/baidu_event_extra_2020/raw_data/train.json
+  eval_dataset: ./data/baidu_event_extra_2020/raw_data/dev.json
+  test_dataset: ./data/baidu_event_extra_2020/raw_data/dev.json
+  predict_dataset: ./data/baidu_event_extra_2020/raw_data/test1.json
+  label_dir: ./data/baidu_event_extra_2020/final_data/labels.txt
+  multi_label_classification_threshold: 0.6 # 多标签分类的阈值，可以自定义
+
+model:
+  pretrained_name_or_path: hfl/chinese-bert-wwm-ext  # ptrsxu/chinese-bert-wwm-ext 可以是huggingface上模型的名字或者是路径
+run:
+  device_id: '1' # 使用cpu则置为-1
+
+train:
+  train_epochs: 10
+  per_device_batch_size: 32
+  logging_steps: 50  # 训练多少步打印一次loss
+  eval_steps: 200 # 训练多少步进行一次eval，保存一次checkpoint
+
+  select_model_metric: 'macro_f1' #用来原则最优模型的key
+
+  use_class_weight: False # 是否按类别数量权重更新loss, 仅支持单标签
+  class_weight_max_scale_ratio: 10.0 # 最大扩充比例
+
+  use_adversarial: False # 仅支持FGM
+
+  with_amp: True # 是否使用混合精度训练
+
+  max_length: 128 #最长字数限制
+  learning_rate: 3.0e-5
+  gradient_accumulation_steps: 1 # 梯度累加步长，用时间换空间
+  warmup_ratio: 0.01
+  max_grad_norm: 1.0
+  weight_decay: 0.01
+
+
+
+
+
+

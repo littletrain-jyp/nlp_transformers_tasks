@@ -14,6 +14,8 @@ import numpy as np
 import torch
 from datetime import timedelta
 
+logger = logging.getLogger(__name__)
+
 def set_seed(seed=2023):
     """
     设置随机数种子，保证实验可重现
@@ -24,7 +26,6 @@ def set_seed(seed=2023):
     torch.manual_seed(seed)
     np.random.seed(seed)
     torch.cuda.manual_seed_all(seed)
-
 
 def set_logger(log_path):
     """
@@ -62,8 +63,6 @@ def get_time_diff(start_time):
     end_time = time.time()
     time_diff = end_time - start_time
     return timedelta(seconds=int(round(time_diff)))
-
-
 
 def keep_checkpoints_num(ckpt_dir, ckpt_filename_keyword='checkpoint', ckpt_nums=3):
     """
@@ -122,5 +121,44 @@ def get_latest_checkpoints_dir(ckpt_dir, ckpt_filename_keyword='checkpoint'):
     else:
         return ckpt_dirlist
 
+def get_multi_onehot_label(labels, label_size, dtype=torch.long):
+    """ 针对输入label，生成multi_onehot label
+    e.g. input: [[0,1], [2]]
+         output: [[1,1,0], [0,0,1]]
+    """
+    batch_size = len(labels)
+    max_label_num = max([len(x) for x in labels])
+    labels_extend = [[labels[i][0] for x in range(max_label_num)] for i in range(batch_size)]
+
+    for i in range(0, batch_size):
+        labels_extend[i][0: len(labels[i])] = labels[i]
+
+    y = torch.Tensor(labels_extend).long()
+    y_onehot = torch.zeros(batch_size, label_size, dtype=dtype).scatter_(1, y, 1)
+    return y_onehot
+
+def load_ckp(model, optimizer, checkpoint_path, device='cpu'):
+    """ 读取ckpt"""
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    model.to(device)
+    model.load_state_dict(checkpoint['state_dict'])
+    optimizer.load_state_dict(checkpoint['optimizer'])
+    epoch = checkpoint['epoch']
+    loss = checkpoint['loss']
+    global_step = checkpoint['global_step']
+    return model, optimizer, epoch, loss, global_step
+
+def load_model(model, checkpoint_path, device='cpu'):
+    checkpoint = torch.load(checkpoint_path, device)
+    model.load_state_dict(checkpoint['state_dict'])
+    logger.info(f"---{checkpoint_path} read successfully! ")
+    return model
+
+def save_ckp(state, checkpoint_path):
+    """ 保存ckpt"""
+    torch.save(state, checkpoint_path)
+    logger.info(f"---{checkpoint_path} saved successfully! ")
 
 
+if __name__ == "__main__":
+    print(get_multi_onehot_label([[0,1], [2], [3,2]], 4))
