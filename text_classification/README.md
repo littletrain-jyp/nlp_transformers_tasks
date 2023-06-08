@@ -3,9 +3,9 @@
 
 ## 相关说明
 ```
---conf: 用于存放各种任务的conf文件，用于指定模型名称、数据集地址、学习率等配置。
---data: 用于存放各个数据集
---dataset: 用于存放读取各个数据集的类，在dataset.py文件中需要根据自己数据集的格式自定义对应的处理类。
+-- conf: 用于存放各种任务的conf文件，用于指定模型名称、数据集地址、学习率等配置。
+-- data: 用于存放各个数据集
+-- dataset: 用于存放读取各个数据集的类，在dataset.py文件中需要根据自己数据集的格式自定义对应的处理类。
 -- models: 用于存放模型
 -- utils: 用于存放一些辅助函数
 -- classifiaction_trainer.py：是自己手写的trainer, 定义训练,预测,评估等流程
@@ -27,7 +27,7 @@
 
 ### 示例
 #### 单标签分类 cnews数据集
-数据下载地址：链接: https://pan.baidu.com/s/1hugrfRu 密码: qfud
+数据下载地址：链接: https://pan.baidu.com/s/1hugrfRu 密码: qfud  
 git clone后执行命令：
 ```
 cd ./text_classification
@@ -154,22 +154,22 @@ weighted avg       0.96      0.89      0.92      1657
 # TODO:
 - 支持更多样的自定义的模型结构：
   - [x] transformer类模型： pretrain + MLP
-  - [ ] 传统机器学习浅层模型
+  - [ ] 传统机器学习浅层模型 (doing)
   - [ ] 深度学习模型
-  - [ ] prompt learning 文本分类
+  - [ ] prompt learning 文本分类 (doing)
 - 支持更多的功能：
   - [ ] 模型蒸馏
-  - [ ] 转onnx
+  - [ ] 转onnx (doing)
   - [ ] ckpt 继续训练 功能的完善
   - [ ] 更多文本分类trick支持：如focal loss
-  - [ ] 分布式训练
-  - [ ] 读取数据集方式修改（目前是一次性读到内存中）
+  - [ ] 分布式训练 (doing)
+  - [ ] 读取数据集方式修改（目前是一次性读到内存中hh） (doing)
 
 
 # 后续优化方向：
-## pretrain model 类
+## PLM类
 - 多尝试不同的预训练模型： RoBERT, WWM, ALBERT
-- 除了 cls 外还可以用avg, max池化做句向量的表示，甚至可以把不同层组合起来
+- 除了用cls外还可以用avg, max池化做句向量的表示，甚至可以把不同层组合起来
 - 在领域数据上做增量预训练
 - 集成蒸馏， 训多个大模型集成起来然后蒸馏到一个上
 - 先用多任务训，再迁移到自己的任务上
